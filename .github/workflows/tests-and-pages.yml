@@ -1,38 +1,73 @@
-      - name: Build (diagnose compile) - no tests
-        env:
-          HEADLESS: "true"
-          BROWSER_LANG: "he"
-          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
-          CI: "true"
-        run: |
-          set -o pipefail
-          # נריץ קומפילציה בלבד עם דיבאג מלא ובלי fork כדי להדפיס טעויות של javac
-          mvn -e -X -Dmaven.compiler.fork=false -Dfile.encoding=UTF-8 -DskipTests compile | tee compile.log
-          # נשמור עותק בטוח
-          cp compile.log target/compile.log || true
+name: Run UI Tests & Publish Allure
 
-      - name: Upload compile log (always)
-        if: always()
-        uses: actions/upload-artifact@v4
+on:
+  push:
+    branches: [ master ]      # שנה ל-main אם צריך
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    env:
+      # יציבות סביבת build
+      MAVEN_OPTS: "-Xmx1g -Djava.awt.headless=true"
+      LANG: "C.UTF-8"
+      LC_ALL: "C.UTF-8"
+      HEADLESS: "true"        # אם הקוד שלך קורא ENV להפעלת headless
+      BROWSER_LANG: "he"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java (Temurin 22)
+        uses: actions/setup-java@v4
         with:
-          name: compile-log
-          path: target/compile.log
-          if-no-files-found: ignore
+          distribution: temurin
+          java-version: "22"
+          cache: maven
 
-      - name: Run tests (headless)
-        # נריץ רק אם הקומפילציה הצליחה
-        if: success()
-        env:
-          HEADLESS: "true"
-          BROWSER_LANG: "he"
-          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
-          CI: "true"
+      - name: Install Chrome
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Verify toolchain
         run: |
-          mvn --batch-mode test \
+          echo "Java:" && java -version
+          echo "Maven:" && mvn -v
+          echo "Chrome:" && ${{ steps.setup-chrome.outputs.chrome-path }} --version || true
+
+      # קומפילציה עם לוג מלא (ללכוד בעיות מוקדם), בלי להריץ טסטים עדיין
+      - name: Build (compile only)
+        run: |
+          mvn --batch-mode -U clean compile \
             -Dmaven.compiler.fork=false \
+            -Dmaven.compiler.release=22 \
+            -Dfile.encoding=UTF-8
+
+      # הרצת טסטים headless
+      - name: Test
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: |
+          mvn --batch-mode test -fae \
+            -Dmaven.compiler.fork=false \
+            -Dmaven.compiler.release=22 \
             -Dfile.encoding=UTF-8 \
             -Dsurefire.printSummary=true
 
+      # אם טסטים נכשלים – הדפס דוחות לוג מיידית
       - name: Print Surefire reports on failure
         if: failure()
         run: |
@@ -40,23 +75,38 @@
           if ls target/surefire-reports/*.txt 1> /dev/null 2>&1; then
             for f in target/surefire-reports/*.txt; do
               echo "----- $f -----"
-              cat "$f"
+              sed -n '1,400p' "$f"
             done
           else
             echo "No *.txt reports found."
           fi
+          echo "=== Surefire reports (xml heads) ==="
+          if ls target/surefire-reports/*.xml 1> /dev/null 2>&1; then
+            for f in target/surefire-reports/*.xml; do
+              echo "----- $f -----"
+              sed -n '1,120p' "$f"
+            done
+          else
+            echo "No *.xml reports found."
+          fi
 
+      # יצירת דוח Allure אם נוצרו תוצאות
       - name: Generate Allure report (HTML)
         if: always()
         run: |
-          if [ -d "target/allure-results" ]; then
+          if [ -d "target/allure-results" ] && [ "$(ls -A target/allure-results)" ]; then
             npx -y allure-commandline@latest generate target/allure-results -o target/allure-report --clean
           else
-            echo "No target/allure-results found, skipping Allure HTML generation."
+            echo "No allure-results found; creating placeholder."
             mkdir -p target/allure-report
-            echo "<html><body><h2>No Allure results were generated.</h2></body></html>" > target/allure-report/index.html
+            cat > target/allure-report/index.html <<'HTML'
+            <!doctype html><meta charset="utf-8">
+            <title>No Allure Results</title>
+            <h2 style="font-family:system-ui">No Allure results were generated in this run.</h2>
+            HTML
           fi
 
+      # הכנת Pages ופריסה — תמיד, גם אם הטסטים נכשלו (תקבל דף עם placeholder)
       - name: Setup Pages
         if: always()
         uses: actions/configure-pages@v5
