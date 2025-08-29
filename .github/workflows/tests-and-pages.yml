@@ -1,13 +1,12 @@
-name: Run UI Tests & Publish Allure
+name: UI Tests (Java 22) + Allure Pages
 
 on:
   push:
-    branches: [ master ]      # שנה ל-main אם צריך
-  pull_request:
+    branches: [ master ]   # שנה ל-main אם צריך
   workflow_dispatch:
 
 jobs:
-  test-and-publish:
+  test:
     runs-on: ubuntu-latest
 
     permissions:
@@ -15,23 +14,11 @@ jobs:
       pages: write
       id-token: write
 
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-
-    env:
-      # יציבות סביבת build
-      MAVEN_OPTS: "-Xmx1g -Djava.awt.headless=true"
-      LANG: "C.UTF-8"
-      LC_ALL: "C.UTF-8"
-      HEADLESS: "true"        # אם הקוד שלך קורא ENV להפעלת headless
-      BROWSER_LANG: "he"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java (Temurin 22)
+      - name: Set up Java 22
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -39,85 +26,50 @@ jobs:
           cache: maven
 
       - name: Install Chrome
-        id: setup-chrome
+        id: chrome
         uses: browser-actions/setup-chrome@v1
 
-      - name: Verify toolchain
-        run: |
-          echo "Java:" && java -version
-          echo "Maven:" && mvn -v
-          echo "Chrome:" && ${{ steps.setup-chrome.outputs.chrome-path }} --version || true
-
-      # קומפילציה עם לוג מלא (ללכוד בעיות מוקדם), בלי להריץ טסטים עדיין
-      - name: Build (compile only)
-        run: |
-          mvn --batch-mode -U clean compile \
-            -Dmaven.compiler.fork=false \
-            -Dmaven.compiler.release=22 \
-            -Dfile.encoding=UTF-8
-
-      # הרצת טסטים headless
-      - name: Test
+      - name: Run tests (headless)
         env:
-          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+          HEADLESS: "true"                                  # הקוד שלך יודע לקרוא מזה
+          BROWSER_LANG: "he"
+          CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }} # Selenium ימצא את Chrome
         run: |
-          mvn --batch-mode test -fae \
-            -Dmaven.compiler.fork=false \
+          java -version
+          mvn -v
+          mvn -U --batch-mode clean test \
             -Dmaven.compiler.release=22 \
+            -Dmaven.compiler.fork=false \
             -Dfile.encoding=UTF-8 \
             -Dsurefire.printSummary=true
 
-      # אם טסטים נכשלים – הדפס דוחות לוג מיידית
-      - name: Print Surefire reports on failure
-        if: failure()
-        run: |
-          echo "=== Surefire reports (txt) ==="
-          if ls target/surefire-reports/*.txt 1> /dev/null 2>&1; then
-            for f in target/surefire-reports/*.txt; do
-              echo "----- $f -----"
-              sed -n '1,400p' "$f"
-            done
-          else
-            echo "No *.txt reports found."
-          fi
-          echo "=== Surefire reports (xml heads) ==="
-          if ls target/surefire-reports/*.xml 1> /dev/null 2>&1; then
-            for f in target/surefire-reports/*.xml; do
-              echo "----- $f -----"
-              sed -n '1,120p' "$f"
-            done
-          else
-            echo "No *.xml reports found."
-          fi
-
-      # יצירת דוח Allure אם נוצרו תוצאות
-      - name: Generate Allure report (HTML)
-        if: always()
+      # נבדוק אם יש תוצאות Allure לפני שנמשיך
+      - name: Check Allure results
+        id: check
         run: |
           if [ -d "target/allure-results" ] && [ "$(ls -A target/allure-results)" ]; then
-            npx -y allure-commandline@latest generate target/allure-results -o target/allure-report --clean
+            echo "has_results=true" >> $GITHUB_OUTPUT
           else
-            echo "No allure-results found; creating placeholder."
-            mkdir -p target/allure-report
-            cat > target/allure-report/index.html <<'HTML'
-            <!doctype html><meta charset="utf-8">
-            <title>No Allure Results</title>
-            <h2 style="font-family:system-ui">No Allure results were generated in this run.</h2>
-            HTML
+            echo "has_results=false" >> $GITHUB_OUTPUT
           fi
 
-      # הכנת Pages ופריסה — תמיד, גם אם הטסטים נכשלו (תקבל דף עם placeholder)
-      - name: Setup Pages
-        if: always()
+      - name: Generate Allure HTML
+        if: steps.check.outputs.has_results == 'true'
+        run: |
+          npx -y allure-commandline@latest generate target/allure-results \
+            -o target/allure-report --clean
+
+      - name: Configure GitHub Pages
+        if: steps.check.outputs.has_results == 'true'
         uses: actions/configure-pages@v5
 
-      - name: Upload Pages artifact
-        if: always()
+      - name: Upload report as Pages artifact
+        if: steps.check.outputs.has_results == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: target/allure-report
 
       - name: Deploy to GitHub Pages
+        if: steps.check.outputs.has_results == 'true'
         id: deploy
-        if: always()
         uses: actions/deploy-pages@v4
