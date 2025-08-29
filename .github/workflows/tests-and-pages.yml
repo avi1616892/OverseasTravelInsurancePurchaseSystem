@@ -1,0 +1,50 @@
+name: Run UI Tests & Publish Allure
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Install Chrome
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Build & Test (headless)
+        env:
+          HEADLESS: "true"
+          BROWSER_LANG: "he"
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: mvn -B -q clean test
+
+      - name: Generate Allure report (HTML)
+        run: |
+          npx -y allure-commandline@latest generate target/allure-results -o target/allure-report --clean
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/allure-report
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
