@@ -2,7 +2,7 @@ name: Run UI Tests & Publish Allure
 
 on:
   push:
-    branches: [ master ]   # התאמה ל-branch שלך
+    branches: [ master ]   # תואם ל-branch שלך
   pull_request:
   workflow_dispatch:
 
@@ -10,20 +10,26 @@ jobs:
   test-and-publish:
     runs-on: ubuntu-latest
 
+    # הרשאות ש-GitHub Pages דורש
     permissions:
       contents: read
       pages: write
       id-token: write
 
+    # כדי לקבל קישור אוטומטי לכתובת ה-Pages אחרי הדיפלוי
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy-pages.outputs.page_url }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up Java (Temurin 22)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "22"     # תואם ל-pom (release 22)
+          java-version: "22"
           cache: maven
 
       - name: Install Chrome
@@ -32,14 +38,54 @@ jobs:
 
       - name: Build & Test (headless)
         env:
-          HEADLESS: "true"
+          HEADLESS: "true"  # אם הקוד שלך קורא מזה להפעלה headless
           BROWSER_LANG: "he"
           CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
-        run: mvn -B -q clean test
+          CI: "true"
+        run: |
+          echo "Java:"
+          java -version
+          echo "Maven:"
+          mvn -v
+
+          # בנייה והרצת טסטים עם פירוט והדפסת שגיאות קומפילציה
+          mvn --batch-mode clean test \
+            -Dmaven.compiler.fork=false \
+            -Dfile.encoding=UTF-8 \
+            -Dsurefire.printSummary=true
+
+      - name: Print Surefire reports on failure
+        if: failure()
+        run: |
+          echo "=== Surefire reports (txt) ==="
+          if ls target/surefire-reports/*.txt 1> /dev/null 2>&1; then
+            for f in target/surefire-reports/*.txt; do
+              echo "----- $f -----"
+              cat "$f"
+            done
+          else
+            echo "No *.txt reports found."
+          fi
+          echo "=== Surefire reports (xml) ==="
+          if ls target/surefire-reports/*.xml 1> /dev/null 2>&1; then
+            for f in target/surefire-reports/*.xml; do
+              echo "----- $f -----"
+              sed -n '1,200p' "$f"
+            done
+          else
+            echo "No *.xml reports found."
+          fi
 
       - name: Generate Allure report (HTML)
+        if: always()
         run: |
-          npx -y allure-commandline@latest generate target/allure-results -o target/allure-report --clean
+          if [ -d "target/allure-results" ]; then
+            npx -y allure-commandline@latest generate target/allure-results -o target/allure-report --clean
+          else
+            echo "No target/allure-results found, skipping Allure HTML generation."
+            mkdir -p target/allure-report
+            echo "<html><body><h2>No Allure results were generated.</h2></body></html>" > target/allure-report/index.html
+          fi
 
       - name: Upload Pages artifact
         if: always()
@@ -48,4 +94,6 @@ jobs:
           path: target/allure-report
 
       - name: Deploy to GitHub Pages
+        id: deploy-pages
+        if: always()
         uses: actions/deploy-pages@v4
